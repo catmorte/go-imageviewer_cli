@@ -2,11 +2,13 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"image"
+	"image/gif"
 	_ "image/jpeg"
 	_ "image/png"
 	"os"
-	"sync"
+	"strings"
 	"time"
 
 	tm "github.com/buger/goterm"
@@ -19,18 +21,12 @@ type Image struct {
 	W, H   int
 	ratio  float64
 }
+
 type Pixel struct {
 	r, g, b uint8
 }
 
-func LoadImage(path string) (*Image, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	rawImage, _, err := image.Decode(f)
-
+func convertImage(rawImage image.Image) *Image {
 	w := rawImage.Bounds().Max.X
 	h := rawImage.Bounds().Max.Y
 	img := &Image{
@@ -47,7 +43,36 @@ func LoadImage(path string) (*Image, error) {
 			img.pixels[y][x] = pixel
 		}
 	}
-	return img, err
+	return img
+}
+
+func LoadImage(path string) ([]*Image, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	isGif := strings.HasSuffix(path, ".gif")
+	var imgs []*Image
+	if isGif {
+		rawImage, err := gif.DecodeAll(f)
+		if err != nil {
+			return nil, err
+		}
+		fmt.Println(len(rawImage.Image))
+		for _, img := range rawImage.Image {
+			imgs = append(imgs, convertImage(img))
+		}
+	} else {
+		rawImage, _, err := image.Decode(f)
+		if err != nil {
+			return nil, err
+		}
+		img := convertImage(rawImage)
+		imgs = append(imgs, img)
+	}
+	return imgs, err
 }
 
 var (
@@ -57,12 +82,12 @@ var (
 
 	xl, yl, imgXl, imgYl, xlBounded, ylBounded, cursorX, cursorY, offsetX, offsetY, windowXl, windowYl int
 	zoom                                                                                               int = 1
-	fieldLock                                                                                          sync.RWMutex
 	consoleRatio                                                                                       float64
-	img                                                                                                *Image
+	imgs                                                                                               []*Image
 	canZoom, canOffsetX, canOffsetY                                                                    bool
-
-	pixelsInWindow int
+	imgIndex                                                                                           int = 0
+	pixelsInWindow                                                                                     int
+	showCursor                                                                                         bool
 )
 
 func resetConsole() {
@@ -71,15 +96,16 @@ func resetConsole() {
 	consoleRatio = float64(xl) / float64(yl)
 }
 
-func bgFire(r, g, b uint8) string {
-	return color.RGB(r, g, b, true).Sprint(tm.Color(*symbol, tm.BLACK))
+func bgFire(r, g, b uint8, symbol string) string {
+	return color.RGB(r, g, b, true).Sprint(tm.Color(symbol, tm.BLACK))
 }
 
-func fgFire(r, g, b uint8) string {
-	return color.RGB(r, g, b, false).Sprint(*symbol)
+func fgFire(r, g, b uint8, symbol string) string {
+	return color.RGB(r, g, b, false).Sprint(symbol)
 }
 
 func recalcWindow() {
+	img := imgs[0]
 	xlBounded, ylBounded = xl, yl
 	if consoleRatio > img.ratio {
 		xlBounded = int(float64(yl) * (img.ratio))
@@ -115,6 +141,7 @@ func zoomIn() {
 	cursorX, cursorY = 0, 0
 	term.SetCursor(cursorX, cursorY)
 	recalcWindow()
+	tm.Clear()
 	draw()
 }
 
@@ -130,6 +157,7 @@ func zoomOut() {
 	cursorX, cursorY = 0, 0
 	term.SetCursor(cursorX, cursorY)
 	recalcWindow()
+	tm.Clear()
 	draw()
 }
 
@@ -147,12 +175,14 @@ func cursorUp() {
 				offsetY = 0
 			}
 			recalcWindow()
+			tm.Clear()
 			draw()
 		}
 	}
 }
 
 func cursorDown() {
+	img := imgs[0]
 	if cursorY < ylBounded-1 {
 		cursorY++
 		if zoom == 1 {
@@ -163,12 +193,14 @@ func cursorDown() {
 		if offsetY < img.H && canOffsetY {
 			offsetY = offsetY + windowYl
 			recalcWindow()
+			tm.Clear()
 			draw()
 		}
 	}
 }
 
 func cursorRight() {
+	img := imgs[0]
 	if cursorX < xlBounded-1 {
 		cursorX++
 		if zoom == 1 {
@@ -179,6 +211,7 @@ func cursorRight() {
 		if offsetX < img.W && canOffsetX {
 			offsetX = offsetX + windowXl
 			recalcWindow()
+			tm.Clear()
 			draw()
 		}
 	}
@@ -198,13 +231,22 @@ func cursorLeft() {
 				offsetX = 0
 			}
 			recalcWindow()
+			tm.Clear()
 			draw()
 		}
 	}
 }
 
+func toggleCursor() {
+	if len(imgs) > 1 {
+		showCursor = !showCursor
+		tm.Clear()
+		draw()
+	}
+}
+
 func draw() {
-	tm.Clear()
+	img := imgs[imgIndex]
 	for i := 0; i < ylBounded; i++ {
 		if i*windowYl+offsetY >= img.H {
 			break
@@ -225,13 +267,21 @@ func draw() {
 			}
 			realR, realG, realB := sumR/pixelsInWindow, sumG/pixelsInWindow, sumB/pixelsInWindow
 			if *isBg {
-				tm.Print(bgFire(uint8(realR), uint8(realG), uint8(realB)))
+				tm.Print(bgFire(uint8(realR), uint8(realG), uint8(realB), *symbol))
 			} else {
-				tm.Print(fgFire(uint8(realR), uint8(realG), uint8(realB)))
+				tm.Print(fgFire(uint8(realR), uint8(realG), uint8(realB), *symbol))
 			}
 		}
 		if i != ylBounded-1 {
 			tm.Println()
+		}
+	}
+	if showCursor && zoom == 1 {
+		tm.MoveCursor(cursorX, cursorY)
+		if *isBg {
+			tm.Print(bgFire(255, 0, 0, " "))
+		} else {
+			tm.Print(fgFire(255, 0, 0, "_"))
 		}
 	}
 	tm.Flush()
@@ -247,7 +297,7 @@ func reset() {
 func main() {
 	flag.Parse()
 	var err error
-	img, err = LoadImage(*path)
+	imgs, err = LoadImage(*path)
 	if err != nil {
 		panic(err)
 	}
@@ -264,6 +314,7 @@ func main() {
 
 	action := make(chan func())
 	exit := make(chan struct{})
+
 	go func() {
 		for {
 			newXl, newYl := tm.Width(), tm.Height()
@@ -273,12 +324,6 @@ func main() {
 			time.Sleep(1 * time.Second)
 		}
 	}()
-	sendAction := func(f func()) {
-		select {
-		case action <- f:
-		default:
-		}
-	}
 
 	go func() {
 		for {
@@ -286,19 +331,35 @@ func main() {
 			case term.EventKey:
 				switch ev.Key {
 				case term.KeyArrowUp:
-					sendAction(cursorUp)
+					action <- (cursorUp)
 				case term.KeyArrowDown:
-					sendAction(cursorDown)
+					action <- (cursorDown)
 				case term.KeyArrowLeft:
-					sendAction(cursorLeft)
+					action <- (cursorLeft)
 				case term.KeyArrowRight:
-					sendAction(cursorRight)
+					action <- (cursorRight)
 				case term.KeyCtrlC:
 					close(exit)
 				case term.KeyEnter:
-					sendAction(zoomIn)
+					action <- (zoomIn)
 				case term.KeyEsc:
-					sendAction(zoomOut)
+					action <- (zoomOut)
+				case term.KeySpace:
+					action <- (toggleCursor)
+				}
+			}
+		}
+	}()
+
+	go func() {
+		if len(imgs) == 1 {
+			action <- (draw)
+		} else {
+			for {
+				for i := range imgs {
+					imgIndex = i
+					action <- (draw)
+					time.Sleep(50 * time.Millisecond)
 				}
 			}
 		}
