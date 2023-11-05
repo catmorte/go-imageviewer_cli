@@ -1,4 +1,4 @@
-module github.com/catmorte/go-autosnake_cli
+module github.com/catmorte/go-imageviewer_cli
 
 go 1.20
 
